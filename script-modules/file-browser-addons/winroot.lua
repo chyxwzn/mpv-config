@@ -17,7 +17,7 @@ local function get_drives()
         name = 'subprocess',
         playback_only = false,
         capture_stdout = true,
-        args = {'wmic', 'logicaldisk', 'get', 'caption'}
+        args = {'fsutil', 'fsinfo', 'drives'}
     })
     if result.status ~= 0 then return msg.error('could not read windows root') end
 
