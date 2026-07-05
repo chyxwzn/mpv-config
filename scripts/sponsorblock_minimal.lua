@@ -1,140 +1,148 @@
--- sponsorblock_minimal.lua
+-- sponsorblock_minimal.lua v 0.5.1
 --
--- This script skips sponsored segments of YouTube videos
+-- This script skip/mute sponsored segments of YouTube and bilibili videos
 -- using data from https://github.com/ajayyy/SponsorBlock
+-- and https://github.com/hanydd/BilibiliSponsorBlock
 
 local opt = require 'mp.options'
 local utils = require 'mp.utils'
 
 local options = {
-	server = "https://sponsor.ajay.app/api/skipSegments",
-
-	-- Categories to fetch and skip
-	categories = '"sponsor"',
-
-	-- Set this to "true" to use sha256HashPrefix instead of videoID
-	hash = false
+    youtube_sponsor_server = "https://sponsor.ajay.app/api/skipSegments",
+    bilibili_sponsor_server = "https://bsbsb.top/api/skipSegments",
+    -- Categories to fetch
+    -- Perform skip/mute/mark chapter based on the 'actionType' returned
+    categories = '"sponsor"',
 }
 
 opt.read_options(options)
 
-function getranges(url)
-	local luacurl_available, cURL = pcall(require,'cURL')
+local ranges = nil
+local video_id = nil
+local sponsor_server = nil
+local cache = {}
+local mute = false
+local ON = false
 
-	local res = ""
-	if not(luacurl_available) then -- if Lua-cURL is not available on this system
-		local sponsors = mp.command_native{
-			name = "subprocess",
-			capture_stdout = true,
-			playback_only = false,
-			args = {"curl", "-L", "-s", "-g", url}
-		}
-		res = sponsors.stdout
-	else -- otherwise use Lua-cURL (binding to libcurl)
-		local buf={}
-		local c = cURL.easy_init()
-		c:setopt_followlocation(1)
-		c:setopt_url(url)
-		c:setopt_writefunction(function(chunk) table.insert(buf,chunk); return true; end)
-		c:perform()
-		res = table.concat(buf)
-	end
+local function getranges(url)
+    local res = mp.command_native{
+        name = "subprocess",
+        capture_stdout = true,
+        playback_only = false,
+        args = {
+            "curl", "-L", "-s", "-g",
+            "-H", "origin: mpv-script/sponsorblock_minimal",
+            "-H", "x-ext-version: 0.5.1",
+            url
+        }
+    }
 
-	local json = utils.parse_json(res)
-	if options.hash and json ~= nil then
-		for _, i in pairs(json) do
-			if i.videoID == youtube_id then
-				return i.segments
-			end
-		end
-	else
-		return json
-	end
+    if res.status ~= 0 then
+        return nil
+    end
 
-	return nil
+    return utils.parse_json(res.stdout)
 end
 
-function skip_ads(name,pos)
-	if pos ~= nil then
-		for _, i in pairs(ranges) do
-			v = i.segment[2]
-			if i.segment[1] <= pos and v > pos then
-				--this message may sometimes be wrong
-				--it only seems to be a visual thing though
-				mp.osd_message(("[sponsorblock] skipping forward %ds"):format(math.floor(v-mp.get_property("time-pos"))))
-				--need to do the +0.01 otherwise mpv will start spamming skip sometimes
-				--example: https://www.youtube.com/watch?v=4ypMJzeNooo
-				mp.set_property("time-pos",v+0.01)
-				return
-			end
-		end
-	end
-	return
+local function make_chapter(ranges)
+    local chapters_time = {}
+    local chapters_title = {}
+    local chapter_index = 0
+    local all_chapters = mp.get_property_native("chapter-list")
+    for _, v in pairs(ranges) do
+        table.insert(chapters_time, v.segment[1])
+        table.insert(chapters_title, v.category)
+        table.insert(chapters_time, v.segment[2])
+        table.insert(chapters_title, "normal")
+    end
+
+    for i = 1, #chapters_time do
+        chapter_index = chapter_index + 1
+        all_chapters[chapter_index] = {
+            title = chapters_title[i] or ("Chapter " .. string.format("%02.f", chapter_index)),
+            time = chapters_time[i]
+        }
+    end
+
+    table.sort(all_chapters, function(a, b) return a['time'] < b['time'] end)
+    mp.set_property_native("chapter-list", all_chapters)
 end
 
-function file_loaded()
-	local video_path = mp.get_property("path", "")
-	local video_referer = string.match(mp.get_property("http-header-fields", ""), "Referer:([^,]+)") or ""
-
-	local urls = {
-		"ytdl://youtu%.be/([%w-_]+).*",
-		"ytdl://w?w?w?%.?youtube%.com/v/([%w-_]+).*",
-		"https?://youtu%.be/([%w-_]+).*",
-		"https?://w?w?w?%.?youtube%.com/v/([%w-_]+).*",
-		"/watch.*[?&]v=([%w-_]+).*",
-		"/embed/([%w-_]+).*",
-		"^ytdl://([%w-_]+)$",
-		"-([%w-_]+)%."
-	}
-	youtube_id = nil
-	local purl = mp.get_property("metadata/by-key/PURL", "")
-	for i,url in ipairs(urls) do
-		youtube_id = youtube_id or string.match(video_path, url) or string.match(video_referer, url) or string.match(purl, url)
-	end
-
-	if not youtube_id or string.len(youtube_id) < 11 then return end
-	youtube_id = string.sub(youtube_id, 1, 11)
-
-	local url = ""
-	if options.hash then
-		local sha = mp.command_native{
-			name = "subprocess",
-			capture_stdout = true,
-			args = {"sha256sum"},
-			stdin_data = youtube_id
-		}
-		url = ("%s/%s?categories=[%s]"):format(options.server, string.sub(sha.stdout, 0, 4), options.categories)
-	else
-		url = ("%s?videoID=%s&categories=[%s]"):format(options.server, youtube_id, options.categories)
-	end
-
-	ranges = getranges(url)
-	if ranges ~= nil then
-		ON = true
-		mp.add_key_binding("b","sponsorblock",toggle)
-		mp.observe_property("time-pos", "native", skip_ads)
-	end
-	return
+local function skip_ads(_, pos)
+    if pos ~= nil and ranges ~= nil then
+        for _, v in pairs(ranges) do
+            if v.actionType == "skip" and v.segment[1] <= pos and v.segment[2] > pos then
+                --this message may sometimes be wrong
+                --it only seems to be a visual thing though
+                local time = math.floor(v.segment[2] - pos)
+                mp.osd_message(string.format("[sponsorblock] skipping forward %ds", time))
+                --need to do the +0.01 otherwise mpv will start spamming skip sometimes
+                mp.set_property("time-pos", v.segment[2] + 0.01)
+            elseif v.actionType == "mute" then
+                if v.segment[1] <= pos and v.segment[2] >= pos then
+                    cache[v.segment[2]] = nil
+                    mp.set_property_bool("mute", true)
+                elseif pos > v.segment[2] and not cache[v.segment[2]] and mute ~= false then
+                    cache[v.segment[2]] = true
+                    mp.set_property_bool("mute", false)
+                end
+            end
+        end
+    end
 end
 
-function end_file()
-	if not ON then return end
-	mp.unobserve_property(skip_ads)
-	ranges = nil
-	ON = false
+local function file_loaded()
+    cache = {}
+    local video_path = mp.get_property("path", "")
+    local video_referer = mp.get_property("http-header-fields", ""):match("[Rr]eferer:%s*([^,\r\n]+)") or ""
+    local purl = mp.get_property("metadata/by-key/PURL", "")
+    local bilibili = video_path:match("bilibili.com/video") or video_referer:match("bilibili.com/video") or false
+    mute = mp.get_property_bool("mute")
+
+    local urls = {
+        "ytdl://youtu%.be/([%w-_]+).*",
+        "ytdl://w?w?w?%.?youtube%.com/v/([%w-_]+).*",
+        "ytdl://w?w?w?%.?bilibili%.com/video/([%w-_]+).*",
+        "https?://youtu%.be/([%w-_]+).*",
+        "https?://w?w?w?%.?youtube%.com/v/([%w-_]+).*",
+        "https?://w?w?w?%.?bilibili%.com/video/([%w-_]+).*",
+        "/watch.*[?&]v=([%w-_]+).*",
+        "/embed/([%w-_]+).*",
+        "^ytdl://([%w-_]+)$",
+        "-([%w-_]+)%."
+    }
+
+    for _, url in ipairs(urls) do
+        video_id = video_id or video_path:match(url) or video_referer:match(url) or purl:match(url)
+    end
+
+    if not video_id or string.len(video_id) < 11 then return end
+
+    if bilibili then
+        sponsor_server = options.bilibili_sponsor_server
+        video_id = string.sub(video_id, 1, 12)
+    else
+        sponsor_server = options.youtube_sponsor_server
+        video_id = string.sub(video_id, 1, 11)
+    end
+
+    local url = ("%s?videoID=%s&categories=[%s]"):format(sponsor_server, video_id, options.categories)
+
+    ranges = getranges(url)
+    if ranges ~= nil then
+        make_chapter(ranges)
+        ON = true
+        mp.observe_property("time-pos", "native", skip_ads)
+    end
 end
 
-function toggle()
-	if ON then
-		mp.unobserve_property(skip_ads)
-		mp.osd_message("[sponsorblock] off")
-		ON = false
-		return
-	end
-	mp.observe_property("time-pos", "native", skip_ads)
-	mp.osd_message("[sponsorblock] on")
-	ON = true
-	return
+local function end_file()
+    if not ON then return end
+    mp.unobserve_property(skip_ads)
+    video_id = nil
+    cache = nil
+    ranges = nil
+    ON = false
 end
 
 mp.register_event("file-loaded", file_loaded)

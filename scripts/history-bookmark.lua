@@ -10,6 +10,7 @@ local o = {
     enabled = true,
     -- eng=English, chs=Chinese Simplified
     language = 'eng',
+    timeout = 15,
     save_period = 30,
     -- Set '/:dir%mpvconf%/historybookmarks' to use mpv config directory
     -- OR change to '/:dir%script%/historybookmarks' for placing it in the same directory of script
@@ -38,6 +39,8 @@ options.read_options(o, _, function() end)
 o.excluded_dir = utils.parse_json(o.excluded_dir)
 o.included_dir = utils.parse_json(o.included_dir)
 
+local file_loaded = false
+
 local locals = {
     ['eng'] = {
         msg1 = 'Resume successfully',
@@ -59,7 +62,6 @@ local path = nil
 local dir = nil
 local fname = nil
 local pl_count = 0
-local pl_dir = nil
 local pl_name = nil
 local pl_path = nil
 local pl_list = {}
@@ -86,7 +88,7 @@ end
 local is_windows = package.config:sub(1, 1) == "\\" -- detect path separator, detect path separator, windows uses backslashes
 --create history_dir if it doesn't exist
 if history_dir ~= '' then
-    local meta, meta_error = utils.file_info(history_dir)
+    local meta = utils.file_info(history_dir)
     if not meta or not meta.is_dir then
         local windows_args = { 'powershell', '-NoProfile', '-Command', 'mkdir', string.format("\"%s\"", history_dir) }
         local unix_args = { 'mkdir', '-p', history_dir }
@@ -108,7 +110,7 @@ local function split(input)
     return ret
 end
 
-ext_whitelist = split(o.whitelist)
+local ext_whitelist = split(o.whitelist)
 
 local function exclude(extension)
     if #ext_whitelist > 0 then
@@ -127,7 +129,7 @@ local function is_protocol(path)
 end
 
 local function need_ignore(tab, val)
-    for index, element in ipairs(tab) do
+    for _, element in pairs(tab) do
         if string.find(val, element) then
             return true
         end
@@ -135,16 +137,25 @@ local function need_ignore(tab, val)
     return false
 end
 
-local function tablelength(tab, val)
+local function tablelength(tab)
     local count = 0
-    for index, element in ipairs(tab) do
+    for _, _ in pairs(tab) do
         count = count + 1
     end
     return count
 end
 
-local function prompt_msg(msg, ms)
-    mp.commandv("show-text", msg, ms)
+local message_overlay = mp.create_osd_overlay('ass-events')
+local message_timer = mp.add_timeout(1, function ()
+    message_overlay:remove()
+end, true)
+
+function show_message(text, time)
+    message_timer:kill()
+    message_timer.timeout = time or 1
+    message_overlay.data = text
+    message_overlay:update()
+    message_timer:resume()
 end
 
 local function normalize(path)
@@ -262,6 +273,7 @@ end
 local function get_bookmark_path(dir)
     local fpath = string.sub(dir, 1, -2)
     local _, name = utils.split_path(fpath)
+    local history_name = nil
     if o.hash then
         history_name = hash(dir)
         if history_name == nil then
@@ -384,7 +396,6 @@ end
 
 local function create_playlist(dir)
     local pl_list = {}
-    local file_list = {}
     local file_list = utils.readdir(dir, 'files')
     for i = 1, #file_list do
         local file = file_list[i]
@@ -428,7 +439,7 @@ end
 
 local function jump_resume()
     mp.unregister_event(jump_resume)
-    prompt_msg(texts.msg1, 1500)
+    show_message(texts.msg1, 2)
 end
 
 local function unbind_key()
@@ -461,7 +472,7 @@ end
 
 -- creat a .history file
 local function record_history()
-    if not o.enabled then return end
+    if not o.enabled or not file_loaded then return end
     refresh_globals()
     if not path or is_protocol(path) then return end
     get_bookmark_path(dir)
@@ -480,13 +491,13 @@ local function record_history()
     end
 end
 
-local timeout = 15
-local function wait4jumping()
+local timeout = o.timeout
+local function wait_jumping()
     timeout = timeout - 1
     if timeout > 0 then
         if not on_key then
             local msg = string.format("%s -- %s? (%s) %02d", wait_msg, texts.msg2, texts.msg3, timeout)
-            prompt_msg(msg, 1000)
+            show_message(msg, 1)
             bind_key()
         else
             timeout = 0
@@ -501,7 +512,7 @@ end
 
 -- record the file name when video is paused
 -- and stop the timer
-local function pause(name, paused)
+local function pause(_, paused)
     if paused then
         timer4saving_history:stop()
         record_history()
@@ -533,7 +544,12 @@ local function record()
         return
     else
         pl_name = get_record(bookmark_path)
-        pl_path = utils.join_path(dir, pl_name)
+        if pl_name then
+            pl_path = utils.join_path(dir, pl_name)
+        else
+            pl_name = fname
+            pl_path = path
+        end
     end
 
     if o.use_playlist or pl_count > 1 then
@@ -559,13 +575,14 @@ local function record()
     elseif current_idx and (pl_idx ~= current_idx) then
         wait_msg = pl_idx
         msg.verbose('Last watched episode -- ' .. wait_msg)
-        wait_jump_timer = mp.add_periodic_timer(1, wait4jumping)
+        wait_jump_timer = mp.add_periodic_timer(1, wait_jumping)
     end
     timer4saving_history = mp.add_periodic_timer(o.save_period, record_history)
     mp.observe_property("pause", "bool", pause)
 end
 
 mp.register_event('file-loaded', function()
+    file_loaded = true
     local path = mp.get_property("path")
     if not is_protocol(path) then
         path = normalize(path)
@@ -581,4 +598,5 @@ end)
 mp.add_hook("on_unload", 50, function()
     mp.unobserve_property(pause)
     record_history()
+    file_loaded = false
 end)

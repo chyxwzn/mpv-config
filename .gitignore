@@ -1,8 +1,10 @@
 *.log
 *.xml
 *.txt
+config.json
 
 cache/
+state/
 files/
 playlists/
 
