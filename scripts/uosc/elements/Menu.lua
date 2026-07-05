@@ -367,7 +367,14 @@ end
 
 -- Updates element coordinates to match padding box of currently open (sub)menu.
 function Menu:update_coordinates()
-	local ax = round((display.width - self.current.width) / 2 - self.padding) + self.offset_x
+	local ax
+	-- Per-menu anchor override takes priority over global option
+	local anchor = self.current.anchor or options.menu_anchor
+	if anchor == 'right' then
+		ax = round(display.width - self.current.width - self.padding * 3) + self.offset_x
+	else
+		ax = round((display.width - self.current.width) / 2 - self.padding) + self.offset_x
+	end
 	self:set_coordinates(
 		ax, self.current.top - self.padding,
 		ax + self.current.width + self.padding * 2, self.current.top + self.current.height + self.padding
@@ -1405,9 +1412,10 @@ function Menu:render()
 		local blur_action_index = self.mouse_nav and menu.action_index ~= nil
 
 		-- Background
+		local menu_bg_opacity = self.current.menu_opacity or config.opacity.menu
 		ass:rect(bg_rect.ax, bg_rect.ay, bg_rect.bx, bg_rect.by, {
 			color = bg,
-			opacity = menu_opacity * config.opacity.menu,
+			opacity = menu_opacity * menu_bg_opacity,
 			radius = state.radius > 0 and math.min(state.radius + self.padding, state.radius * 3) or 0,
 		})
 

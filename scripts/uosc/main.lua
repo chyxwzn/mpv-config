@@ -50,6 +50,7 @@ defaults = {
 	menu_min_width = 260,
 	menu_padding = 4,
 	menu_type_to_search = true,
+	menu_anchor = 'center',   -- 'center' or 'right'
 
 	top_bar = 'no-border',
 	top_bar_size = 40,
